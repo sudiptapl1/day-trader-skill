@@ -35,6 +35,10 @@ python3 "${CLAUDE_SKILL_DIR}/check.py" --no-write                # look without 
 python3 "${CLAUDE_SKILL_DIR}/check.py" --now "2026-10-19 10:15"  # pin the clock (New York time)
 ```
 
+## India (NSE)
+
+An orders file for NSE tickers (`"market": "in"`) is checked against NSE hours (9:15 to 15:30 India time), the NSE 2026 holidays and rupee limits. A ticker must look like `RELIANCE.NS` or `BAJAJ-AUTO.NS`.
+
 ## What it reads and writes
 
 | file | what |

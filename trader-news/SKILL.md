@@ -29,6 +29,10 @@ python3 "${CLAUDE_SKILL_DIR}/news.py" --tickers TSLA NVDA --hours 12
 python3 "${CLAUDE_SKILL_DIR}/news.py" --no-sec --json
 ```
 
+## India (NSE)
+
+With NSE tickers (`RELIANCE.NS`, or `--market in`) headlines come from Yahoo's India feed, times print in IST, and SEC filings are skipped (they cover US companies only).
+
 ## What it reads and writes
 
 | file / feed | what |

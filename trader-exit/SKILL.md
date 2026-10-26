@@ -38,6 +38,10 @@ Other flags: `--flat-by 15:55`, `--json`, `--now "2026-10-19 10:15"` (New
 York time), `--entry PRICE` with a waiting entry.json to plan ahead, `--setup
 level`, `--offline FILE` (a saved Yahoo chart JSON for an ATR stop).
 
+## India (NSE)
+
+An entry from India mode carries `"market": "in"` and the plan follows it: prices in rupees, flat by 15:15 India time unless the config says otherwise. `--market in` does the same for a plan from flags.
+
 ## What it reads and writes
 
 | file | what |

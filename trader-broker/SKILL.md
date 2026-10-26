@@ -45,6 +45,10 @@ python3 "${CLAUDE_SKILL_DIR}/ticket.py" log
 is a real yes for that order, builds the flatten ticket, and keeps the log in
 `trader/state/broker.json`. `--now "2026-10-19 10:15"` pins the clock (New York time).
 
+## India (NSE)
+
+Alpaca does not trade the NSE. For an India orders file the ticket says so and the user enters the order in their own broker's app (an intraday order with the same stop-loss and target), or through IBKR. The yes rules are the same; record what happened with `result` and `fill`.
+
 ## What it reads and writes
 
 | file | what |

@@ -92,6 +92,196 @@ OPEN = datetime.time(9, 30)
 CLOSE = datetime.time(16, 0)
 EARLY = datetime.time(13, 0)
 
+# ---------------------------------------------------------------- market: US (NYSE) or India (NSE)
+# The tables above are the US market and "us" stays the default. set_market("in")
+# switches this script to the NSE: 9:15 to 15:30 India time (Asia/Kolkata, UTC+5:30
+# all year, no daylight saving), the NSE holiday list, rupees and Yahoo's .NS symbols.
+# Pick it with --market in, "market": "in" in trader/config.json, a plan or orders
+# file that says "market": "in", or tickers that all end in .NS / .BO.
+# This block is the same in every trader-* script (tests/test_market.py checks it).
+
+NSE_HOLIDAYS = {  # NSE equity segment, weekday closures in 2026 (NSE circulars, Dec 2025 and Jan 2026)
+    "2026-01-15": "Municipal Corporation elections in Maharashtra",
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-03-26": "Shri Ram Navami",
+    "2026-03-31": "Shri Mahavir Jayanti",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Baba Saheb Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-28": "Bakri Id",
+    "2026-06-26": "Muharram",
+    "2026-09-14": "Ganesh Chaturthi",
+    "2026-10-02": "Mahatma Gandhi Jayanti",
+    "2026-10-20": "Dussehra",
+    "2026-11-10": "Diwali Balipratipada",
+    "2026-11-24": "Prakash Gurpurb Sri Guru Nanak Dev",
+    "2026-12-25": "Christmas",
+}
+NSE_CALENDAR_YEARS = (2026,)   # NSE publishes the next year's list in December
+IST = datetime.timedelta(hours=5, minutes=30)
+MARKETS = {
+    "us": {"exchange": "NYSE", "place": "New York", "zone": "ET", "currency": "$", "code": "USD",
+           "calendar_url": "nyse.com"},
+    "in": {"exchange": "NSE", "place": "India time", "zone": "IST", "currency": "\u20b9", "code": "INR",
+           "calendar_url": "nseindia.com"},
+}
+MARKET_ALIASES = {"india": "in", "nse": "in", "ind": "in", "usa": "us", "nyse": "us"}
+INDIA_SUFFIXES = (".NS", ".BO")
+MARKET = "us"
+INDIA = {   # what set_market("in") puts in place of the US names (only names this script has)
+    "NYSE_HOLIDAYS": NSE_HOLIDAYS, "NYSE_EARLY_CLOSE": {}, "CALENDAR_YEARS": NSE_CALENDAR_YEARS,
+    "OPEN": datetime.time(9, 15), "CLOSE": datetime.time(15, 30), "EARLY": datetime.time(15, 30),
+}
+_US = {}
+INDIA_SCRIPT = {"DEFAULTS": {"flat_by": "15:15", "min_reward_risk": 1.0}}   # brokers square off intraday from 15:15
+
+
+def _ist_offset(utc):
+    """Hours from UTC for India: +5.5 all year."""
+    return 5.5
+
+
+def _ist_to_utc(local):
+    return local - IST
+
+
+def market_code(text):
+    code = str(text or "us").strip().lower()
+    code = MARKET_ALIASES.get(code, code)
+    if code not in MARKETS:
+        raise ValueError("unknown market %r: use us or in" % text)
+    return code
+
+
+def set_market(code):
+    """Switch the clock, calendar, currency and script defaults to "us" or "in"."""
+    global MARKET
+    code = market_code(code)
+    g = globals()
+    swap = dict(INDIA, eastern_offset=_ist_offset, eastern_to_utc=_ist_to_utc)
+    swap.update(g.get("INDIA_SCRIPT", {}))
+    if not _US:
+        _US.update({k: g[k] for k in swap if k in g})
+    g.update(_US if code == "us" else {k: v for k, v in swap.items() if k in _US})
+    MARKET = code
+    return code
+
+
+def is_india_symbol(sym):
+    return str(sym or "").strip().upper().endswith(INDIA_SUFFIXES)
+
+
+def market_symbol(sym):
+    """In India mode a bare NSE ticker gets Yahoo's .NS suffix ("NSE:RELIANCE" and
+    "reliance" both become RELIANCE.NS; BSE's .BO is kept). US tickers pass through."""
+    s = str(sym or "").strip().upper()
+    if MARKET == "in" and s:
+        if s.startswith("NSE:"):
+            s = s[4:]
+        if not s.endswith(INDIA_SUFFIXES):
+            s += ".NS"
+    return s
+
+
+def yahoo_ticker(sym):
+    """Yahoo's spelling: BRK.B -> BRK-B, but RELIANCE.NS keeps its exchange suffix."""
+    s = str(sym or "").strip().upper()
+    return s if s.endswith(INDIA_SUFFIXES) else s.replace(".", "-")
+
+
+def read_doc(path):
+    """A JSON file as a dict, or {} (only for picking the market; commands report real errors)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return doc if isinstance(doc, dict) else {}
+    except (TypeError, OSError, ValueError):
+        return {}
+
+
+def pick_market(cli=None, config=None, docs=(), symbols=()):
+    """--market, else a plan / orders doc that names one, else trader/config.json, else
+    tickers that all end in .NS / .BO, else the US."""
+    if cli:
+        return market_code(cli)
+    for d in docs:
+        if isinstance(d, dict) and d.get("market"):
+            return market_code(d["market"])
+    if config and os.path.exists(config):
+        try:
+            with open(config, encoding="utf-8") as fh:
+                m = json.load(fh).get("market")
+            if m:
+                return market_code(m)
+        except (ValueError, OSError, AttributeError):
+            pass
+    syms = [s for s in symbols if s]
+    if syms and all(is_india_symbol(s) for s in syms):
+        return "in"
+    return "us"
+
+
+def tag_market(doc):
+    """Name the market in a file this script writes, so the next skill picks it up.
+    US files stay exactly as they were (no key means the US)."""
+    if MARKET != "us" and isinstance(doc, dict):
+        doc["market"] = MARKET
+    return doc
+
+
+def lakh(digits):
+    """Indian digit grouping: 500,000 -> 5,00,000 and 12,345,678 -> 1,23,45,678."""
+    d = digits.replace(",", "")
+    if len(d) <= 3:
+        return d
+    head, tail = d[:-3], d[-3:]
+    pairs = []
+    while len(head) > 2:
+        pairs.insert(0, head[-2:])
+        head = head[:-2]
+    return ",".join([head] + pairs + [tail])
+
+
+def localize(text):
+    """US wording -> the current market's: $ -> the rupee sign, New York -> India time,
+    ET -> IST, NYSE -> NSE. A no-op in the US."""
+    if MARKET == "us" or not text:
+        return text
+    m = MARKETS[MARKET]
+    text = re.sub(r"\$(?=[\d(.\-])", m["currency"], text)
+    if MARKET == "in":
+        text = re.sub(u"\u20b9(\\d{1,3}(?:,\\d{3})+)", lambda g: u"\u20b9" + lakh(g.group(1)), text)
+    text = text.replace("nyse.com", m["calendar_url"]).replace("NYSE", m["exchange"])
+    text = re.sub(r"\bET\b", m["zone"], text)
+    text = text.replace("a New York", "an " + m["place"]).replace("New York time", m["place"])
+    return text.replace("New York", m["place"])
+
+
+class _Localized(object):
+    """Wraps stdout so everything a command prints reads in the current market's terms."""
+
+    def __init__(self, stream):
+        self._s = stream
+
+    def write(self, text):
+        return self._s.write(localize(text))
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+
+def run_localized(fn, *args):
+    """Run a command with stdout and stderr localized (a no-op in the US)."""
+    if MARKET == "us":
+        return fn(*args)
+    out, err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = _Localized(out), _Localized(err)
+    try:
+        return fn(*args)
+    finally:
+        sys.stdout, sys.stderr = out, err
+
 
 class PlanError(Exception):
     pass
@@ -391,7 +581,7 @@ def read_text(path):
 
 
 def load_chart(sym, interval, day, offline=None):
-    ysym = sym.upper().replace(".", "-")
+    ysym = yahoo_ticker(sym)
     if offline:
         path = offline
         if os.path.isdir(offline):
@@ -535,7 +725,7 @@ def gather(a):
             raise PlanError("--symbol needs --entry PRICE")
         if (a.or_high is None) != (a.or_low is None):
             raise PlanError("give both --or-high and --or-low, or neither")
-        info = {"symbol": a.symbol.upper(), "entry": a.entry, "setup": a.setup or ("orb" if a.or_high is not None else "level"),
+        info = {"symbol": market_symbol(a.symbol), "entry": a.entry, "setup": a.setup or ("orb" if a.or_high is not None else "level"),
                 "date": a.date, "entry_time": a.time, "entry_bar": a.entry_bar, "interval": a.interval or "5m",
                 "or_high": a.or_high, "or_low": a.or_low, "or_minutes": a.or_minutes, "source": "flags"}
     else:
@@ -547,7 +737,7 @@ def gather(a):
             raise PlanError("%s says %s is %s, not triggered: plan once it triggers, or give --entry PRICE to plan ahead"
                             % (path, doc.get("symbol"), doc.get("status") or "unknown"))
         orr = doc.get("opening_range") or {}
-        info = {"symbol": str(doc.get("symbol") or "").upper(), "entry": a.entry if a.entry is not None else doc.get("price"),
+        info = {"symbol": market_symbol(doc.get("symbol")), "entry": a.entry if a.entry is not None else doc.get("price"),
                 "setup": a.setup or doc.get("setup") or "orb", "date": a.date or doc.get("date"),
                 "entry_time": a.time or (doc.get("time") if a.entry is None else None),
                 "entry_bar": a.entry_bar if a.entry_bar is not None else (doc.get("bar_index") if a.entry is None else None),
@@ -604,7 +794,8 @@ def build_plan(a, now_utc):
             "stop": float(c["stop"]), "stop_rule": stop_rule, "stop_label": c["stop_label"],
             "target": float(c["target"]), "target_r": float(c["target_r"]), "target_label": c["target_label"],
             "risk_per_share": float(c["risk"]), "reward_risk": float(c["reward_risk"]), "flat_by": flat_by,
-            "stop_detail": c["stop_detail"], "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), "note": NOTE}
+            "stop_detail": localize(c["stop_detail"]), "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), "note": NOTE}
+    tag_market(plan)
     if atr is not None:
         plan["atr"] = round(atr, 4)
         plan["atr_bars"] = atr_n
@@ -643,7 +834,7 @@ def describe(plan):
     out.append("  Target        %s  %s" % (money(plan["target"]), plan["target_label"]))
     out.append("  Risk a share  %s (%s%% of the entry)" % (money(plan["risk_per_share"]), pct))
     out.append("  Reward:risk   %s" % ratio(plan["reward_risk"]))
-    out.append("  Flat by       %s ET, win or lose: no overnight hold" % plan["flat_by"])
+    out.append("  Flat by       %s %s, win or lose: no overnight hold" % (plan["flat_by"], MARKETS[MARKET]["zone"]))
     out.append("Set before the entry. If price hits the stop, you are out; never move it further away.")
     out.append(NOTE)
     return out
@@ -720,14 +911,19 @@ def main(argv=None):
     p.add_argument("--plan", default="trader/plan.json")
     p.add_argument("--now")
     p.add_argument("--json", action="store_true")
+    for p in sub.choices.values():
+        p.add_argument("--market", help="us (NYSE, the default) or in (NSE, India time, rupees)")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
         return 1
     try:
-        return {"plan": cmd_plan, "show": cmd_show}[a.cmd](a)
-    except PlanError as e:
-        print("exit.py: %s" % e, file=sys.stderr)
+        doc = read_doc(a.plan) if a.cmd == "show" else ({} if a.symbol else read_doc(a.from_path or "trader/entry.json"))
+        set_market(pick_market(a.market, getattr(a, "config", None) or "trader/config.json", docs=[doc],
+                               symbols=[getattr(a, "symbol", None)]))
+        return run_localized({"plan": cmd_plan, "show": cmd_show}[a.cmd], a)
+    except (PlanError, ValueError) as e:
+        print("exit.py: %s" % localize(str(e)), file=sys.stderr)
         return 1
 
 

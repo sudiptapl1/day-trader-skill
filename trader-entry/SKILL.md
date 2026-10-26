@@ -41,6 +41,10 @@ saved Yahoo chart JSON, `.json` or `.json.gz`, or a folder of
 `watch` with `--now` or `--offline` runs on a simulated clock and replays the
 day bar by bar without waiting.
 
+## India (NSE)
+
+With `--market in` (or an NSE ticker like `RELIANCE.NS`) the session is 9:15 to 15:30 India time, the 15-minute range is 9:15 to 9:30, the NSE 2026 holidays apply, and the default window is 09:30 to 15:00. `trader/entry.json` then says `"market": "in"`.
+
 ## What it reads and writes
 
 | file | what |
