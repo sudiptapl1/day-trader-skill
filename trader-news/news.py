@@ -39,6 +39,7 @@ nothing here as advice.
 """
 
 import argparse
+import datetime
 import datetime as _dt
 import email.utils
 import gzip
@@ -87,6 +88,196 @@ KEYWORDS = [
     ("macro", r"\bFed\b|\bFOMC\b|\bCPI\b|\binflation\b|\bjobs report\b|\bpayrolls\b|\btariffs?\b|\bfutures\b"),
 ]
 
+# ---------------------------------------------------------------- market: US (NYSE) or India (NSE)
+# The tables above are the US market and "us" stays the default. set_market("in")
+# switches this script to the NSE: 9:15 to 15:30 India time (Asia/Kolkata, UTC+5:30
+# all year, no daylight saving), the NSE holiday list, rupees and Yahoo's .NS symbols.
+# Pick it with --market in, "market": "in" in trader/config.json, a plan or orders
+# file that says "market": "in", or tickers that all end in .NS / .BO.
+# This block is the same in every trader-* script (tests/test_market.py checks it).
+
+NSE_HOLIDAYS = {  # NSE equity segment, weekday closures in 2026 (NSE circulars, Dec 2025 and Jan 2026)
+    "2026-01-15": "Municipal Corporation elections in Maharashtra",
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-03-26": "Shri Ram Navami",
+    "2026-03-31": "Shri Mahavir Jayanti",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Baba Saheb Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-28": "Bakri Id",
+    "2026-06-26": "Muharram",
+    "2026-09-14": "Ganesh Chaturthi",
+    "2026-10-02": "Mahatma Gandhi Jayanti",
+    "2026-10-20": "Dussehra",
+    "2026-11-10": "Diwali Balipratipada",
+    "2026-11-24": "Prakash Gurpurb Sri Guru Nanak Dev",
+    "2026-12-25": "Christmas",
+}
+NSE_CALENDAR_YEARS = (2026,)   # NSE publishes the next year's list in December
+IST = datetime.timedelta(hours=5, minutes=30)
+MARKETS = {
+    "us": {"exchange": "NYSE", "place": "New York", "zone": "ET", "currency": "$", "code": "USD",
+           "calendar_url": "nyse.com"},
+    "in": {"exchange": "NSE", "place": "India time", "zone": "IST", "currency": "\u20b9", "code": "INR",
+           "calendar_url": "nseindia.com"},
+}
+MARKET_ALIASES = {"india": "in", "nse": "in", "ind": "in", "usa": "us", "nyse": "us"}
+INDIA_SUFFIXES = (".NS", ".BO")
+MARKET = "us"
+INDIA = {   # what set_market("in") puts in place of the US names (only names this script has)
+    "NYSE_HOLIDAYS": NSE_HOLIDAYS, "NYSE_EARLY_CLOSE": {}, "CALENDAR_YEARS": NSE_CALENDAR_YEARS,
+    "OPEN": datetime.time(9, 15), "CLOSE": datetime.time(15, 30), "EARLY": datetime.time(15, 30),
+}
+_US = {}
+INDIA_SCRIPT = {"YAHOO": "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%s&region=IN&lang=en-IN"}
+
+
+def _ist_offset(utc):
+    """Hours from UTC for India: +5.5 all year."""
+    return 5.5
+
+
+def _ist_to_utc(local):
+    return local - IST
+
+
+def market_code(text):
+    code = str(text or "us").strip().lower()
+    code = MARKET_ALIASES.get(code, code)
+    if code not in MARKETS:
+        raise ValueError("unknown market %r: use us or in" % text)
+    return code
+
+
+def set_market(code):
+    """Switch the clock, calendar, currency and script defaults to "us" or "in"."""
+    global MARKET
+    code = market_code(code)
+    g = globals()
+    swap = dict(INDIA, eastern_offset=_ist_offset, eastern_to_utc=_ist_to_utc)
+    swap.update(g.get("INDIA_SCRIPT", {}))
+    if not _US:
+        _US.update({k: g[k] for k in swap if k in g})
+    g.update(_US if code == "us" else {k: v for k, v in swap.items() if k in _US})
+    MARKET = code
+    return code
+
+
+def is_india_symbol(sym):
+    return str(sym or "").strip().upper().endswith(INDIA_SUFFIXES)
+
+
+def market_symbol(sym):
+    """In India mode a bare NSE ticker gets Yahoo's .NS suffix ("NSE:RELIANCE" and
+    "reliance" both become RELIANCE.NS; BSE's .BO is kept). US tickers pass through."""
+    s = str(sym or "").strip().upper()
+    if MARKET == "in" and s:
+        if s.startswith("NSE:"):
+            s = s[4:]
+        if not s.endswith(INDIA_SUFFIXES):
+            s += ".NS"
+    return s
+
+
+def yahoo_ticker(sym):
+    """Yahoo's spelling: BRK.B -> BRK-B, but RELIANCE.NS keeps its exchange suffix."""
+    s = str(sym or "").strip().upper()
+    return s if s.endswith(INDIA_SUFFIXES) else s.replace(".", "-")
+
+
+def read_doc(path):
+    """A JSON file as a dict, or {} (only for picking the market; commands report real errors)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return doc if isinstance(doc, dict) else {}
+    except (TypeError, OSError, ValueError):
+        return {}
+
+
+def pick_market(cli=None, config=None, docs=(), symbols=()):
+    """--market, else a plan / orders doc that names one, else trader/config.json, else
+    tickers that all end in .NS / .BO, else the US."""
+    if cli:
+        return market_code(cli)
+    for d in docs:
+        if isinstance(d, dict) and d.get("market"):
+            return market_code(d["market"])
+    if config and os.path.exists(config):
+        try:
+            with open(config, encoding="utf-8") as fh:
+                m = json.load(fh).get("market")
+            if m:
+                return market_code(m)
+        except (ValueError, OSError, AttributeError):
+            pass
+    syms = [s for s in symbols if s]
+    if syms and all(is_india_symbol(s) for s in syms):
+        return "in"
+    return "us"
+
+
+def tag_market(doc):
+    """Name the market in a file this script writes, so the next skill picks it up.
+    US files stay exactly as they were (no key means the US)."""
+    if MARKET != "us" and isinstance(doc, dict):
+        doc["market"] = MARKET
+    return doc
+
+
+def lakh(digits):
+    """Indian digit grouping: 500,000 -> 5,00,000 and 12,345,678 -> 1,23,45,678."""
+    d = digits.replace(",", "")
+    if len(d) <= 3:
+        return d
+    head, tail = d[:-3], d[-3:]
+    pairs = []
+    while len(head) > 2:
+        pairs.insert(0, head[-2:])
+        head = head[:-2]
+    return ",".join([head] + pairs + [tail])
+
+
+def localize(text):
+    """US wording -> the current market's: $ -> the rupee sign, New York -> India time,
+    ET -> IST, NYSE -> NSE. A no-op in the US."""
+    if MARKET == "us" or not text:
+        return text
+    m = MARKETS[MARKET]
+    text = re.sub(r"\$(?=[\d(.\-])", m["currency"], text)
+    if MARKET == "in":
+        text = re.sub(u"\u20b9(\\d{1,3}(?:,\\d{3})+)", lambda g: u"\u20b9" + lakh(g.group(1)), text)
+    text = text.replace("nyse.com", m["calendar_url"]).replace("NYSE", m["exchange"])
+    text = re.sub(r"\bET\b", m["zone"], text)
+    text = text.replace("a New York", "an " + m["place"]).replace("New York time", m["place"])
+    return text.replace("New York", m["place"])
+
+
+class _Localized(object):
+    """Wraps stdout so everything a command prints reads in the current market's terms."""
+
+    def __init__(self, stream):
+        self._s = stream
+
+    def write(self, text):
+        return self._s.write(localize(text))
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+
+def run_localized(fn, *args):
+    """Run a command with stdout and stderr localized (a no-op in the US)."""
+    if MARKET == "us":
+        return fn(*args)
+    out, err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = _Localized(out), _Localized(err)
+    try:
+        return fn(*args)
+    finally:
+        sys.stdout, sys.stderr = out, err
+
 
 class NewsError(Exception):
     pass
@@ -133,15 +324,16 @@ def watch_from_files(portfolio="trader/portfolio.json", watchlist="trader/watchl
     for h in wl.get("hits", []):
         sym = h.get("symbol") or h.get("ticker")
         if sym:
-            out[sym.upper()] = h.get("name")
+            out[market_symbol(sym)] = h.get("name")
     pl = load_json(plan) or {}
     if pl.get("symbol"):
-        out.setdefault(pl["symbol"].upper(), pl.get("name"))
+        out.setdefault(market_symbol(pl["symbol"]), pl.get("name"))
     pf = load_json(portfolio) or {}
     for p in pf.get("positions", []):
         sym = p.get("ticker") or p.get("symbol")
         if sym:
-            out[sym.upper()] = p.get("name") or out.get(sym.upper())
+            sym = market_symbol(sym)
+            out[sym] = p.get("name") or out.get(sym)
     return out
 
 
@@ -192,7 +384,7 @@ class Fetcher(object):
 
 
 def yahoo_symbol(ticker):
-    return ticker.upper().replace(".", "-")
+    return yahoo_ticker(ticker)
 
 
 def cik_map(fetcher, state):
@@ -329,6 +521,9 @@ def mention_patterns(watch):
     for t, name in watch.items():
         alts = [r"\(%s\)" % re.escape(t), r"\$%s\b" % re.escape(t),
                 r"\b(?:NYSE|NASDAQ|Nasdaq)\s*:\s*%s\b" % re.escape(t)]
+        if is_india_symbol(t):   # RELIANCE.NS shows up in Indian headlines as NSE: RELIANCE or (RELIANCE)
+            bare = re.escape(t.rsplit(".", 1)[0])
+            alts += [r"\(%s\)" % bare, r"\b(?:NSE|BSE)\s*:\s*%s\b" % bare]
         if name and len(name) >= 4:
             alts.append(r"\b%s\b" % re.escape(name).replace(r"\ ", r"[\s-]"))
         pats[t] = re.compile("|".join(alts))
@@ -497,10 +692,19 @@ def main(argv=None):
     ap.add_argument("--now", help="ISO time, for reproducible runs")
     ap.add_argument("--dry-run", action="store_true", help="do not update the state file")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--market", help="us (NYSE, the default) or in (NSE, India time, rupees)")
     args = ap.parse_args(argv)
+    try:
+        set_market(pick_market(args.market, args.config, docs=[read_doc(args.plan)], symbols=args.tickers or []))
+    except ValueError as e:
+        print("news: %s" % e, file=sys.stderr)
+        return 2
+    return run_localized(_run, args)
 
+
+def _run(args):
     if args.tickers:
-        watch = {t.upper(): None for t in args.tickers}
+        watch = {market_symbol(t): None for t in args.tickers}
         known = watch_from_files(args.portfolio, args.watchlist, args.plan)
         watch.update({t: known[t] for t in watch if known.get(t)})
     else:
@@ -514,6 +718,10 @@ def main(argv=None):
     errors = []
     ua = sec_user_agent(args.user_agent, args.config)
     sec = not args.no_sec
+    if sec and MARKET == "in":
+        errors.append("SEC filings skipped: they cover US companies only. For NSE stocks, read the "
+                      "company announcements at nseindia.com")
+        sec = False
     if sec and not ua and not args.offline:
         errors.append("SEC filings skipped: set sec_user_agent in trader/config.json or "
                       "SEC_USER_AGENT (\"Your Name you@example.com\") to include them")

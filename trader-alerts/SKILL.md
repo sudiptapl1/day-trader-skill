@@ -44,6 +44,10 @@ python3 "${CLAUDE_SKILL_DIR}/alerts.py" reset tsla-plan-stop
 `--now "2026-10-19 15:55"` pins the clock (New York time); `--offline DIR`
 reads saved quote files instead of the network.
 
+## India (NSE)
+
+With `--market in` (or `"market": "in"` in the config, or a plan for an NSE ticker) the clock is the NSE: 9:15 to 15:30 India time, the NSE 2026 holidays, rupees, and `RELIANCE` becomes `RELIANCE.NS`. A plan's flat-by defaults to 15:15. Stooq has no NSE quotes, so use Yahoo.
+
 ## What it reads and writes
 
 | file | what |

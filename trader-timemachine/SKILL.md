@@ -43,6 +43,10 @@ Other flags: `--replays N`, `--seed N` (default 19), `--window N` (default 2
 bars), `--offline FILE` (a saved Yahoo chart JSON, `.json` or `.json.gz`),
 `--now "2026-10-19 10:15"` (New York time) to pin the clock.
 
+## India (NSE)
+
+For an NSE plan (`"market": "in"`, or `--market in`) a full session is 75 five-minute bars, 9:15 to 15:30 India time, and the replays end at 15:30.
+
 ## What it reads and writes
 
 | file | what |

@@ -32,6 +32,8 @@ It needs the SEC User-Agent (`sec_user_agent` in `trader/config.json`, or
 `SEC_USER_AGENT`): "Your Name you@example.com" with the user's real name and
 email. It refuses to call SEC without one.
 
+SEC filings cover US companies only, so this skill has no India mode.
+
 ## What it reads and writes
 
 - Reads `https://data.sec.gov/api/xbrl/companyfacts/CIK##########.json` (every

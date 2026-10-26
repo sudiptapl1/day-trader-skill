@@ -33,6 +33,8 @@ optional, to read the PDFs locally):
 python3 "${CLAUDE_SKILL_DIR}/ptr.py" --help
 ```
 
+Congress's disclosures are US trades, so this skill has no India mode.
+
 ## What it reads and writes
 
 - Reads `https://disclosures-clerk.house.gov/public_disc/financial-pdfs/<YEAR>FD.zip`

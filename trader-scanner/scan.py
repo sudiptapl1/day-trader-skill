@@ -69,8 +69,10 @@ Exit code 0 when the scan found something, 1 when it did not or could not run.
 """
 
 import argparse
+import csv
 import datetime
 import gzip
+import io
 import json
 import os
 import re
@@ -92,6 +94,12 @@ MAX_CONFIRM = 200   # stage-2 v8 charts per orb scan, most traded first
 MIN_DAILY_BARS = 30
 DEFAULT_UNIVERSE = "trader/universe.txt"
 NOTE = "A scan is a list of charts that match a rule, not a list of stocks to buy."
+NSE_EQUITY_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"   # every NSE-listed equity
+NSE_EQUITY_FILE = "EQUITY_L.csv"
+MIN_PRICE = 5.0            # the price floor when --min-price is not given
+MIN_VOLUME_DAILY = 1000000  # the daily scan's volume floor when --min-volume is not given
+NO_ENTRIES_AFTER = "15:30"
+SYM_W = 6                  # the ticker column in the printed lists
 
 NYSE_HOLIDAYS = {
     "2026-01-01": "New Year's Day",
@@ -133,6 +141,196 @@ SETUPS = [
     ("oversold_bounce", "oversold bounce"),
 ]
 LABEL = dict(SETUPS)
+
+# ---------------------------------------------------------------- market: US (NYSE) or India (NSE)
+# The tables above are the US market and "us" stays the default. set_market("in")
+# switches this script to the NSE: 9:15 to 15:30 India time (Asia/Kolkata, UTC+5:30
+# all year, no daylight saving), the NSE holiday list, rupees and Yahoo's .NS symbols.
+# Pick it with --market in, "market": "in" in trader/config.json, a plan or orders
+# file that says "market": "in", or tickers that all end in .NS / .BO.
+# This block is the same in every trader-* script (tests/test_market.py checks it).
+
+NSE_HOLIDAYS = {  # NSE equity segment, weekday closures in 2026 (NSE circulars, Dec 2025 and Jan 2026)
+    "2026-01-15": "Municipal Corporation elections in Maharashtra",
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-03-26": "Shri Ram Navami",
+    "2026-03-31": "Shri Mahavir Jayanti",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Baba Saheb Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-28": "Bakri Id",
+    "2026-06-26": "Muharram",
+    "2026-09-14": "Ganesh Chaturthi",
+    "2026-10-02": "Mahatma Gandhi Jayanti",
+    "2026-10-20": "Dussehra",
+    "2026-11-10": "Diwali Balipratipada",
+    "2026-11-24": "Prakash Gurpurb Sri Guru Nanak Dev",
+    "2026-12-25": "Christmas",
+}
+NSE_CALENDAR_YEARS = (2026,)   # NSE publishes the next year's list in December
+IST = datetime.timedelta(hours=5, minutes=30)
+MARKETS = {
+    "us": {"exchange": "NYSE", "place": "New York", "zone": "ET", "currency": "$", "code": "USD",
+           "calendar_url": "nyse.com"},
+    "in": {"exchange": "NSE", "place": "India time", "zone": "IST", "currency": "\u20b9", "code": "INR",
+           "calendar_url": "nseindia.com"},
+}
+MARKET_ALIASES = {"india": "in", "nse": "in", "ind": "in", "usa": "us", "nyse": "us"}
+INDIA_SUFFIXES = (".NS", ".BO")
+MARKET = "us"
+INDIA = {   # what set_market("in") puts in place of the US names (only names this script has)
+    "NYSE_HOLIDAYS": NSE_HOLIDAYS, "NYSE_EARLY_CLOSE": {}, "CALENDAR_YEARS": NSE_CALENDAR_YEARS,
+    "OPEN": datetime.time(9, 15), "CLOSE": datetime.time(15, 30), "EARLY": datetime.time(15, 30),
+}
+_US = {}
+INDIA_SCRIPT = {"SYM_W": 13, "MIN_PRICE": 50.0, "MIN_VOLUME_DAILY": 300000, "NO_ENTRIES_AFTER": "15:00"}
+
+
+def _ist_offset(utc):
+    """Hours from UTC for India: +5.5 all year."""
+    return 5.5
+
+
+def _ist_to_utc(local):
+    return local - IST
+
+
+def market_code(text):
+    code = str(text or "us").strip().lower()
+    code = MARKET_ALIASES.get(code, code)
+    if code not in MARKETS:
+        raise ValueError("unknown market %r: use us or in" % text)
+    return code
+
+
+def set_market(code):
+    """Switch the clock, calendar, currency and script defaults to "us" or "in"."""
+    global MARKET
+    code = market_code(code)
+    g = globals()
+    swap = dict(INDIA, eastern_offset=_ist_offset, eastern_to_utc=_ist_to_utc)
+    swap.update(g.get("INDIA_SCRIPT", {}))
+    if not _US:
+        _US.update({k: g[k] for k in swap if k in g})
+    g.update(_US if code == "us" else {k: v for k, v in swap.items() if k in _US})
+    MARKET = code
+    return code
+
+
+def is_india_symbol(sym):
+    return str(sym or "").strip().upper().endswith(INDIA_SUFFIXES)
+
+
+def market_symbol(sym):
+    """In India mode a bare NSE ticker gets Yahoo's .NS suffix ("NSE:RELIANCE" and
+    "reliance" both become RELIANCE.NS; BSE's .BO is kept). US tickers pass through."""
+    s = str(sym or "").strip().upper()
+    if MARKET == "in" and s:
+        if s.startswith("NSE:"):
+            s = s[4:]
+        if not s.endswith(INDIA_SUFFIXES):
+            s += ".NS"
+    return s
+
+
+def yahoo_ticker(sym):
+    """Yahoo's spelling: BRK.B -> BRK-B, but RELIANCE.NS keeps its exchange suffix."""
+    s = str(sym or "").strip().upper()
+    return s if s.endswith(INDIA_SUFFIXES) else s.replace(".", "-")
+
+
+def read_doc(path):
+    """A JSON file as a dict, or {} (only for picking the market; commands report real errors)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return doc if isinstance(doc, dict) else {}
+    except (TypeError, OSError, ValueError):
+        return {}
+
+
+def pick_market(cli=None, config=None, docs=(), symbols=()):
+    """--market, else a plan / orders doc that names one, else trader/config.json, else
+    tickers that all end in .NS / .BO, else the US."""
+    if cli:
+        return market_code(cli)
+    for d in docs:
+        if isinstance(d, dict) and d.get("market"):
+            return market_code(d["market"])
+    if config and os.path.exists(config):
+        try:
+            with open(config, encoding="utf-8") as fh:
+                m = json.load(fh).get("market")
+            if m:
+                return market_code(m)
+        except (ValueError, OSError, AttributeError):
+            pass
+    syms = [s for s in symbols if s]
+    if syms and all(is_india_symbol(s) for s in syms):
+        return "in"
+    return "us"
+
+
+def tag_market(doc):
+    """Name the market in a file this script writes, so the next skill picks it up.
+    US files stay exactly as they were (no key means the US)."""
+    if MARKET != "us" and isinstance(doc, dict):
+        doc["market"] = MARKET
+    return doc
+
+
+def lakh(digits):
+    """Indian digit grouping: 500,000 -> 5,00,000 and 12,345,678 -> 1,23,45,678."""
+    d = digits.replace(",", "")
+    if len(d) <= 3:
+        return d
+    head, tail = d[:-3], d[-3:]
+    pairs = []
+    while len(head) > 2:
+        pairs.insert(0, head[-2:])
+        head = head[:-2]
+    return ",".join([head] + pairs + [tail])
+
+
+def localize(text):
+    """US wording -> the current market's: $ -> the rupee sign, New York -> India time,
+    ET -> IST, NYSE -> NSE. A no-op in the US."""
+    if MARKET == "us" or not text:
+        return text
+    m = MARKETS[MARKET]
+    text = re.sub(r"\$(?=[\d(.\-])", m["currency"], text)
+    if MARKET == "in":
+        text = re.sub(u"\u20b9(\\d{1,3}(?:,\\d{3})+)", lambda g: u"\u20b9" + lakh(g.group(1)), text)
+    text = text.replace("nyse.com", m["calendar_url"]).replace("NYSE", m["exchange"])
+    text = re.sub(r"\bET\b", m["zone"], text)
+    text = text.replace("a New York", "an " + m["place"]).replace("New York time", m["place"])
+    return text.replace("New York", m["place"])
+
+
+class _Localized(object):
+    """Wraps stdout so everything a command prints reads in the current market's terms."""
+
+    def __init__(self, stream):
+        self._s = stream
+
+    def write(self, text):
+        return self._s.write(localize(text))
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+
+def run_localized(fn, *args):
+    """Run a command with stdout and stderr localized (a no-op in the US)."""
+    if MARKET == "us":
+        return fn(*args)
+    out, err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = _Localized(out), _Localized(err)
+    try:
+        return fn(*args)
+    finally:
+        sys.stdout, sys.stderr = out, err
 
 
 class ScanError(Exception):
@@ -202,7 +400,7 @@ def trading_day(d):
         return False, "weekend"
     name = NYSE_HOLIDAYS.get(d.isoformat())
     if name:
-        return False, "NYSE holiday: " + name
+        return False, MARKETS[MARKET]["exchange"] + " holiday: " + name
     return True, ""
 
 
@@ -268,7 +466,7 @@ def yahoo_get(path):
 
 
 def to_yahoo(sym):
-    return sym.upper().replace(".", "-")
+    return yahoo_ticker(sym)
 
 
 def spark_path(symbols, rng, interval):
@@ -356,7 +554,7 @@ def _absorb(doc, name_hint, data, errors):
                 sym = (doc["chart"].get("result") or [{}])[0]["meta"]["symbol"]
             except (AttributeError, KeyError, TypeError, IndexError):
                 raise ScanError("an offline v8 chart without a symbol: name the file <TICKER>.json")
-        sym = sym.upper().replace("-", ".")
+        sym = sym.upper() if is_india_symbol(sym) else sym.upper().replace("-", ".")
         try:
             data[sym] = parse_chart(doc, sym)
         except ScanError as e:
@@ -671,10 +869,10 @@ def orb_window(now_utc, at, or_minutes, until, explicit_day=None):
             raise ScanError("The market closed at %s ET on %s. Replay the session with --at 10:15."
                             % (clock_label(close_dt), day_label(day)))
     if cutoff < first_close:
-        raise ScanError("It is %s ET: the %d-minute opening range runs 9:30 to %s and the first bar after it "
+        raise ScanError("It is %s ET: the %d-minute opening range runs %s to %s and the first bar after it "
                         "closes at %s. Run orb again after %s."
-                        % (clock_label(cutoff), or_minutes, clock_label(range_end), clock_label(first_close),
-                           clock_label(first_close)))
+                        % (clock_label(cutoff), or_minutes, "%d:%02d" % (OPEN.hour, OPEN.minute), clock_label(range_end),
+                           clock_label(first_close), clock_label(first_close)))
     if until is not None and cutoff.time() > until:
         raise ScanError("It is %s ET, after %s, your last time for new entries (no_entries_after): an "
                         "opening-range breakout found now is expired. Run orb tomorrow after %s, or replay "
@@ -782,6 +980,7 @@ def read_symbols(a, offline_syms=None):
         syms = symbols_from_file(path)
     out = []
     for s in syms:
+        s = market_symbol(s)
         if s not in out:
             out.append(s)
     if a.limit:
@@ -837,7 +1036,59 @@ def money(x):
 
 # ---------------------------------------------------------------- commands
 
+def parse_nse_equities(text):
+    """NSE's EQUITY_L.csv -> [(SYMBOL.NS, name)] for the EQ series (the shares you can trade intraday;
+    BE / BZ are trade-for-trade, settled by delivery, so no day trades)."""
+    rows = list(csv.reader(io.StringIO(text)))
+    if not rows:
+        return []
+    head = [h.strip().upper() for h in rows[0]]
+    try:
+        i_sym, i_name, i_series = head.index("SYMBOL"), head.index("NAME OF COMPANY"), head.index("SERIES")
+    except ValueError:
+        raise ScanError("%s does not look like NSE's equity list (no SYMBOL / SERIES columns)" % NSE_EQUITY_FILE)
+    out = []
+    for r in rows[1:]:
+        if len(r) > max(i_sym, i_name, i_series) and r[i_series].strip().upper() == "EQ":
+            out.append((r[i_sym].strip().upper() + ".NS", r[i_name].strip()))
+    return out
+
+
+def cmd_universe_india(a):
+    if a.offline:
+        p = os.path.join(a.offline, NSE_EQUITY_FILE)
+        if not os.path.exists(p):
+            raise ScanError("no %s in %s" % (NSE_EQUITY_FILE, a.offline))
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    else:
+        try:
+            text = http_get(NSE_EQUITY_URL, timeout=60)
+        except (urllib.error.URLError, OSError) as e:
+            raise ScanError("could not get NSE's equity list (%s): download %s in a browser, put it in a "
+                            "folder and run universe --market in --offline FOLDER, or scan with --symbols"
+                            % (getattr(e, "reason", e), NSE_EQUITY_URL))
+    kept = parse_nse_equities(text)
+    if not a.no_write:
+        d = os.path.dirname(a.out)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(a.out, "w", encoding="utf-8") as fh:
+            for sym, name in kept:
+                fh.write("%s|%s\n" % (sym, name))
+    if a.json:
+        print(json.dumps({"count": len(kept), "market": MARKET, "out": None if a.no_write else a.out}, indent=2))
+    else:
+        print("NSE equity list: kept %s stocks in the EQ series (the ones you can day trade)."
+              % "{:,}".format(len(kept)))
+        if not a.no_write:
+            print("Wrote %s (one SYMBOL|Name a line)." % a.out)
+    return 0 if kept else 1
+
+
 def cmd_universe(a):
+    if MARKET == "in":
+        return cmd_universe_india(a)
     t0 = time.time()
     texts = {}
     for k, fname in enumerate(NASDAQ_FILES):
@@ -902,7 +1153,7 @@ def cmd_daily(a):
     if a.offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/"))
     if not a.no_write:
-        write_json(a.out, doc)
+        write_json(a.out, tag_market(doc))
     if a.json:
         print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
         return 0 if hits else 1
@@ -924,7 +1175,7 @@ def cmd_daily(a):
     else:
         print("No setups.")
     for h in hits[:a.show]:
-        print("  %-6s %10s  RSI %5.1f  %s" % (h["symbol"], money(h["price"]), h["rsi"],
+        print("  %-*s %10s  RSI %5.1f  %s" % (SYM_W, h["symbol"], money(h["price"]), h["rsi"],
                                               ", ".join(LABEL[t] for t in h["setups"])))
     if len(hits) > a.show:
         print("  ... and %d more in the watchlist (--show N for more)." % (len(hits) - a.show))
@@ -944,7 +1195,7 @@ def cmd_orb(a):
     now = parse_now(a.now)
     at = parse_hhmm(a.at) if a.at else None
     cfg = read_config(a.config)
-    until = parse_hhmm(a.until or cfg.get("no_entries_after") or "15:30", "--until")
+    until = parse_hhmm(a.until or cfg.get("no_entries_after") or NO_ENTRIES_AFTER, "--until")
     data = failed = None
     explicit_day = None
     offline_syms = None
@@ -991,12 +1242,13 @@ def cmd_orb(a):
     if a.offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/"))
     if not a.no_write:
-        write_json(a.out, doc)
+        write_json(a.out, tag_market(doc))
     if a.json:
         print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
         return 0 if hits else 1
-    print("Opening-range breakout scan, %s %s ET: %d-minute range (9:30 to %s), 5-minute bars, Yahoo."
-          % (day_label(day), clock_label(cutoff), a.or_minutes, clock_label(slot(day, a.or_minutes // BAR_MIN))))
+    print("Opening-range breakout scan, %s %s ET: %d-minute range (%s to %s), 5-minute bars, Yahoo."
+          % (day_label(day), clock_label(cutoff), a.or_minutes, "%d:%02d" % (OPEN.hour, OPEN.minute),
+             clock_label(slot(day, a.or_minutes // BAR_MIN))))
     print("Fetched %s of %s charts%s; %s usable%s; %s candidates, %s confirmed with real highs and lows."
           % ("{:,}".format(counts["fetched"]), "{:,}".format(len(symbols)),
              (" (%s failed or had no data)" % "{:,}".format(nfailed)) if nfailed else "",
@@ -1011,8 +1263,8 @@ def cmd_orb(a):
               % (len(hits), ("the %s checked" % "{:,}".format(counts["confirmed"])) if counts["unconfirmed"]
                  else "{:,}".format(counts["scanned"]), clock_label(cutoff)))
         for h in hits[:a.show]:
-            print("  %8s  %-6s %10s  range %s to %s  %+.2f%% over" % (
-                h["at"], h["symbol"], money(h["price"]), _p(h["or_low"]), _p(h["or_high"]), h["pct_over"]))
+            print("  %8s  %-*s %10s  range %s to %s  %+.2f%% over" % (
+                h["at"], SYM_W, h["symbol"], money(h["price"]), _p(h["or_low"]), _p(h["or_high"]), h["pct_over"]))
         if len(hits) > a.show:
             print("  ... and %d more in the watchlist (--show N for more)." % (len(hits) - a.show))
     else:
@@ -1044,7 +1296,8 @@ def main(argv=None):
         g.add_argument("--watchlist", metavar="FILE", help="a watchlist.json (hits) or a text file of tickers")
         p.add_argument("--universe", help="symbol list, one SYMBOL|Name a line (default %s)" % DEFAULT_UNIVERSE)
         p.add_argument("--limit", type=int, help="scan only the first N symbols")
-        p.add_argument("--min-price", type=float, default=min_price)
+        p.add_argument("--min-price", type=float, default=min_price,
+                       help="last price floor (default 5; 50 on the NSE)")
         p.add_argument("--min-volume", type=int, default=min_volume)
         p.add_argument("--offline", metavar="PATH", help="fixture folder or file instead of the network")
         p.add_argument("--now", help='pretend it is this time ("2026-10-19 10:15" New York, or ...Z)')
@@ -1056,23 +1309,31 @@ def main(argv=None):
         p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("daily", help="pre-market setups from daily closes")
-    common(p, 5.0, 1000000)
+    common(p, None, None)
     p = sub.add_parser("orb", help="opening-range breakouts so far today")
-    common(p, 5.0, 0)
+    common(p, None, 0)
     p.add_argument("--or-minutes", type=int, default=15)
     p.add_argument("--max-confirm", type=int, default=MAX_CONFIRM,
                    help="v8 charts to fetch in stage 2, most traded first (%d; 0 = all)" % MAX_CONFIRM)
     p.add_argument("--at", help="cut the clock at this New York time, HH:MM")
     p.add_argument("--until", help="no new entries after HH:MM (default: config no_entries_after, 15:30)")
     p.add_argument("--config", default="trader/config.json")
+    for p in sub.choices.values():
+        p.add_argument("--market", help="us (NYSE, the default) or in (NSE, India time, rupees)")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
         return 1
     try:
-        return {"universe": cmd_universe, "daily": cmd_daily, "orb": cmd_orb}[a.cmd](a)
-    except ScanError as e:
-        print("scan.py: %s" % e, file=sys.stderr)
+        syms = re.split(r"[,\s]+", getattr(a, "symbols", None) or "")
+        set_market(pick_market(a.market, getattr(a, "config", None) or "trader/config.json", symbols=syms))
+        if getattr(a, "min_price", 0) is None:
+            a.min_price = MIN_PRICE
+        if getattr(a, "min_volume", 0) is None:
+            a.min_volume = MIN_VOLUME_DAILY
+        return run_localized({"universe": cmd_universe, "daily": cmd_daily, "orb": cmd_orb}[a.cmd], a)
+    except (ScanError, ValueError) as e:
+        print("scan.py: %s" % localize(str(e)), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("scan.py: stopped", file=sys.stderr)

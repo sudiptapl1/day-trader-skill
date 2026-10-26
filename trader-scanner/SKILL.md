@@ -42,6 +42,10 @@ to read saved Yahoo files, `--no-write`, `--show N`, `--json`. Exit code 0
 when the scan found something, 1 when it found nothing or could not run (the
 reason is one plain line).
 
+## India (NSE)
+
+With `--market in`, `universe` reads NSE's equity list (EQ series, as `SYMBOL.NS`), the opening range starts at 9:15 India time, the NSE 2026 holidays apply, and the price floor is ₹50 (daily volume floor 300,000). If nseindia.com refuses the download, save `EQUITY_L.csv` from a browser and pass `--offline FOLDER`, or scan `--symbols RELIANCE,TCS`.
+
 ## What it reads and writes
 
 | file | what |

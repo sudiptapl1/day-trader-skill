@@ -120,6 +120,47 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
 9. **`/trader-alerts`** rings on the stop, the target and at 3:55 PM to
    flatten whatever is still open.
 
+## India (NSE)
+
+Every trading tool also runs on India's National Stock Exchange. The US stays the
+default, and nothing changes for US trades unless you ask for India. Ask for it
+any one of these ways:
+
+- put `"market": "in"` in `trader/config.json` (start from
+  `trader-budget/config.india.example.json`, which has rupee limits and NSE times)
+- add `--market in` to any command
+- use NSE tickers: `RELIANCE.NS`, `TCS.NS`, or just `RELIANCE` in India mode
+  (`NSE:RELIANCE` works too; BSE's `.BO` is kept as given)
+
+Once the scanner, the entry timer or the exit planner has run in India mode, the
+files it writes say `"market": "in"`, so the next skill follows along.
+
+What changes on the NSE:
+
+| | US (default) | India (`--market in`) |
+| --- | --- | --- |
+| session | 9:30 to 16:00 New York time, DST handled | 9:15 to 15:30 India time (Asia/Kolkata, UTC+5:30 all year) |
+| holidays | NYSE 2026 and 2027, plus 1:00 p.m. early closes | NSE 2026 equity-segment holidays (16 weekday closures, including Diwali Balipratipada on November 10). Outside 2026 the tools say the list is unknown. |
+| entry window | 09:45 to 15:30, flat by 15:55 | 09:30 to 15:00, flat by 15:15 (most brokers square off intraday positions from about 15:15) |
+| money | dollars | rupees, with Indian grouping (₹5,00,000). The `*_usd` config keys are read as rupees. |
+| tickers | Nasdaq Trader's lists | NSE's equity list (`EQUITY_L.csv`, EQ series) via `scan.py universe --market in`, or `--symbols` |
+| quotes and bars | Yahoo | Yahoo's `.NS` charts (Stooq has no NSE quotes) |
+| news | Yahoo US headlines plus SEC 8-Ks | Yahoo India headlines; SEC filings are skipped (check company announcements on nseindia.com) |
+| orders | Alpaca or IBKR | Alpaca does not trade the NSE: the ticket is for you to enter in your broker's app (or IBKR). The yes rules and the risk check still apply. |
+
+```bash
+python3 trader-scanner/scan.py orb --market in --symbols RELIANCE,TCS,INFY,HDFCBANK
+python3 trader-entry/entry.py check RELIANCE --market in --write
+python3 trader-exit/exit.py plan --write            # follows trader/entry.json into India mode
+python3 trader-alerts/alerts.py clock --market in   # is the NSE open?
+```
+
+`/trader-analyst` and `/trader-pelosi` read SEC and US Congress filings, so they
+stay US only. The NSE has no half days; the Diwali Muhurat session (a short
+evening session NSE announces each year) is not in the calendar, so check
+NSE's circular on that day. The tests run the India mode on synthetic NSE
+charts (`tests/nse_synthetic.py`), not real market data.
+
 ## The tools
 
 All standard-library Python. The data tools read public endpoints and are
@@ -205,7 +246,7 @@ trader-entry/       SKILL.md, entry.py
 trader-exit/        SKILL.md, exit.py
 trader-timemachine/ SKILL.md, timemachine.py
 trader-risk/        SKILL.md, check.py
-trader-budget/      SKILL.md, size.py, config.example.json, targets.example.json
+trader-budget/      SKILL.md, size.py, config.example.json, config.india.example.json, targets.example.json
 trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json

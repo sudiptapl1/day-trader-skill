@@ -54,6 +54,199 @@ BATCH_WORDS = {"all", "every", "everything", "rest", "remaining", "them", "both"
 DOUBT_WORDS = {"no", "not", "dont", "don't", "wait", "cancel", "stop", "but", "maybe", "later",
                "hold", "unless", "if"}
 
+# ---------------------------------------------------------------- market: US (NYSE) or India (NSE)
+# The tables above are the US market and "us" stays the default. set_market("in")
+# switches this script to the NSE: 9:15 to 15:30 India time (Asia/Kolkata, UTC+5:30
+# all year, no daylight saving), the NSE holiday list, rupees and Yahoo's .NS symbols.
+# Pick it with --market in, "market": "in" in trader/config.json, a plan or orders
+# file that says "market": "in", or tickers that all end in .NS / .BO.
+# This block is the same in every trader-* script (tests/test_market.py checks it).
+
+NSE_HOLIDAYS = {  # NSE equity segment, weekday closures in 2026 (NSE circulars, Dec 2025 and Jan 2026)
+    "2026-01-15": "Municipal Corporation elections in Maharashtra",
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-03-26": "Shri Ram Navami",
+    "2026-03-31": "Shri Mahavir Jayanti",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Baba Saheb Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-28": "Bakri Id",
+    "2026-06-26": "Muharram",
+    "2026-09-14": "Ganesh Chaturthi",
+    "2026-10-02": "Mahatma Gandhi Jayanti",
+    "2026-10-20": "Dussehra",
+    "2026-11-10": "Diwali Balipratipada",
+    "2026-11-24": "Prakash Gurpurb Sri Guru Nanak Dev",
+    "2026-12-25": "Christmas",
+}
+NSE_CALENDAR_YEARS = (2026,)   # NSE publishes the next year's list in December
+IST = datetime.timedelta(hours=5, minutes=30)
+MARKETS = {
+    "us": {"exchange": "NYSE", "place": "New York", "zone": "ET", "currency": "$", "code": "USD",
+           "calendar_url": "nyse.com"},
+    "in": {"exchange": "NSE", "place": "India time", "zone": "IST", "currency": "\u20b9", "code": "INR",
+           "calendar_url": "nseindia.com"},
+}
+MARKET_ALIASES = {"india": "in", "nse": "in", "ind": "in", "usa": "us", "nyse": "us"}
+INDIA_SUFFIXES = (".NS", ".BO")
+MARKET = "us"
+INDIA = {   # what set_market("in") puts in place of the US names (only names this script has)
+    "NYSE_HOLIDAYS": NSE_HOLIDAYS, "NYSE_EARLY_CLOSE": {}, "CALENDAR_YEARS": NSE_CALENDAR_YEARS,
+    "OPEN": datetime.time(9, 15), "CLOSE": datetime.time(15, 30), "EARLY": datetime.time(15, 30),
+}
+_US = {}
+INDIA_SCRIPT = {"FLAT_BY": "15:15"}   # most Indian brokers square off intraday positions from 15:15
+
+
+def _ist_offset(utc):
+    """Hours from UTC for India: +5.5 all year."""
+    return 5.5
+
+
+def _ist_to_utc(local):
+    return local - IST
+
+
+def market_code(text):
+    code = str(text or "us").strip().lower()
+    code = MARKET_ALIASES.get(code, code)
+    if code not in MARKETS:
+        raise ValueError("unknown market %r: use us or in" % text)
+    return code
+
+
+def set_market(code):
+    """Switch the clock, calendar, currency and script defaults to "us" or "in"."""
+    global MARKET
+    code = market_code(code)
+    g = globals()
+    swap = dict(INDIA, eastern_offset=_ist_offset, eastern_to_utc=_ist_to_utc)
+    swap.update(g.get("INDIA_SCRIPT", {}))
+    if not _US:
+        _US.update({k: g[k] for k in swap if k in g})
+    g.update(_US if code == "us" else {k: v for k, v in swap.items() if k in _US})
+    MARKET = code
+    return code
+
+
+def is_india_symbol(sym):
+    return str(sym or "").strip().upper().endswith(INDIA_SUFFIXES)
+
+
+def market_symbol(sym):
+    """In India mode a bare NSE ticker gets Yahoo's .NS suffix ("NSE:RELIANCE" and
+    "reliance" both become RELIANCE.NS; BSE's .BO is kept). US tickers pass through."""
+    s = str(sym or "").strip().upper()
+    if MARKET == "in" and s:
+        if s.startswith("NSE:"):
+            s = s[4:]
+        if not s.endswith(INDIA_SUFFIXES):
+            s += ".NS"
+    return s
+
+
+def yahoo_ticker(sym):
+    """Yahoo's spelling: BRK.B -> BRK-B, but RELIANCE.NS keeps its exchange suffix."""
+    s = str(sym or "").strip().upper()
+    return s if s.endswith(INDIA_SUFFIXES) else s.replace(".", "-")
+
+
+def read_doc(path):
+    """A JSON file as a dict, or {} (only for picking the market; commands report real errors)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return doc if isinstance(doc, dict) else {}
+    except (TypeError, OSError, ValueError):
+        return {}
+
+
+def pick_market(cli=None, config=None, docs=(), symbols=()):
+    """--market, else a plan / orders doc that names one, else trader/config.json, else
+    tickers that all end in .NS / .BO, else the US."""
+    if cli:
+        return market_code(cli)
+    for d in docs:
+        if isinstance(d, dict) and d.get("market"):
+            return market_code(d["market"])
+    if config and os.path.exists(config):
+        try:
+            with open(config, encoding="utf-8") as fh:
+                m = json.load(fh).get("market")
+            if m:
+                return market_code(m)
+        except (ValueError, OSError, AttributeError):
+            pass
+    syms = [s for s in symbols if s]
+    if syms and all(is_india_symbol(s) for s in syms):
+        return "in"
+    return "us"
+
+
+def tag_market(doc):
+    """Name the market in a file this script writes, so the next skill picks it up.
+    US files stay exactly as they were (no key means the US)."""
+    if MARKET != "us" and isinstance(doc, dict):
+        doc["market"] = MARKET
+    return doc
+
+
+def lakh(digits):
+    """Indian digit grouping: 500,000 -> 5,00,000 and 12,345,678 -> 1,23,45,678."""
+    d = digits.replace(",", "")
+    if len(d) <= 3:
+        return d
+    head, tail = d[:-3], d[-3:]
+    pairs = []
+    while len(head) > 2:
+        pairs.insert(0, head[-2:])
+        head = head[:-2]
+    return ",".join([head] + pairs + [tail])
+
+
+def localize(text):
+    """US wording -> the current market's: $ -> the rupee sign, New York -> India time,
+    ET -> IST, NYSE -> NSE. A no-op in the US."""
+    if MARKET == "us" or not text:
+        return text
+    m = MARKETS[MARKET]
+    text = re.sub(r"\$(?=[\d(.\-])", m["currency"], text)
+    if MARKET == "in":
+        text = re.sub(u"\u20b9(\\d{1,3}(?:,\\d{3})+)", lambda g: u"\u20b9" + lakh(g.group(1)), text)
+    text = text.replace("nyse.com", m["calendar_url"]).replace("NYSE", m["exchange"])
+    text = re.sub(r"\bET\b", m["zone"], text)
+    text = text.replace("a New York", "an " + m["place"]).replace("New York time", m["place"])
+    return text.replace("New York", m["place"])
+
+
+class _Localized(object):
+    """Wraps stdout so everything a command prints reads in the current market's terms."""
+
+    def __init__(self, stream):
+        self._s = stream
+
+    def write(self, text):
+        return self._s.write(localize(text))
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+
+def run_localized(fn, *args):
+    """Run a command with stdout and stderr localized (a no-op in the US)."""
+    if MARKET == "us":
+        return fn(*args)
+    out, err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = _Localized(out), _Localized(err)
+    try:
+        return fn(*args)
+    finally:
+        sys.stdout, sys.stderr = out, err
+
+
+FLAT_BY = "15:55"
+
 
 class TicketError(Exception):
     pass
@@ -106,8 +299,9 @@ def parse_now(text):
 
 def ny_iso(now_utc):
     """naive UTC -> "2026-10-19T10:15:00-04:00" (New York wall clock with its offset)."""
-    off = eastern_offset(now_utc)
-    return "%s%+03d:00" % (to_eastern(now_utc).replace(microsecond=0).isoformat(), off)
+    mins = int(round(eastern_offset(now_utc) * 60))
+    return "%s%s%02d:%02d" % (to_eastern(now_utc).replace(microsecond=0).isoformat(), "-" if mins < 0 else "+",
+                              abs(mins) // 60, abs(mins) % 60)
 
 
 # ---------------------------------------------------------------- files
@@ -284,6 +478,9 @@ def parse_yes(reply, order, batch_symbols=()):
         return False, "the reply has a condition or a doubt in it; ask again"
     sym = str(order.get("symbol", "")).upper()
     tokens = set(re.findall(r"[A-Z][A-Z.\-]{0,6}", raw.upper()))
+    if MARKET == "in":   # NSE names run longer (RELIANCE, M&M) and a reply can leave off the .NS
+        tokens = set(re.findall(r"[A-Z][A-Z0-9&.\-]{0,19}", raw.upper()))
+        tokens |= {t + ".NS" for t in tokens if not t.endswith(INDIA_SUFFIXES)}
     others = {s.upper() for s in batch_symbols} - {sym}
     named = tokens & others
     if named:
@@ -352,9 +549,12 @@ def kind_of(order, rv):
 def render(order, idx, total, cfg, risk, state, today):
     ready, label, rv = status_of(order, risk, state, today)
     broker = str(cfg.get("broker", "alpaca")).lower()
+    if MARKET == "in" and broker != "ibkr":
+        broker = "manual"          # Alpaca does not trade the NSE
     paper = cfg.get("paper", True)
     acct = "PAPER account" if paper else "LIVE ACCOUNT, REAL MONEY"
-    lines = ["ORDER %d of %d, %s, %s" % (idx, total, acct, "Interactive Brokers" if broker == "ibkr" else "Alpaca")]
+    lines = ["ORDER %d of %d, %s, %s" % (idx, total, acct, {"ibkr": "Interactive Brokers",
+                                                             "manual": "your NSE broker"}.get(broker, "Alpaca"))]
     for part in plain_parts(order):
         lines.append("  " + part)
     if order.get("why"):
@@ -365,6 +565,11 @@ def render(order, idx, total, cfg, risk, state, today):
     if broker == "ibkr":
         lines.append("  Claude drafts this with the Interactive Brokers connector. IBKR sends it to your")
         lines.append("  IBKR account, and it only goes to the market after you approve it there.")
+    elif broker == "manual":
+        lines.append("  Alpaca does not trade the NSE, so nothing here can send this order. Enter it yourself in")
+        lines.append("  your broker's app (an intraday / MIS order with this stop-loss and target), or use your")
+        lines.append("  broker's own Claude connector if you have one, which asks for its own approval.")
+        lines.append("  Paper trading: just record it with ticket.py result and fill, no money moves.")
     else:
         lines.append("  Claude will call place_stock_order with exactly:")
         for l in json.dumps(tool_input(order), indent=2).splitlines():
@@ -374,7 +579,7 @@ def render(order, idx, total, cfg, risk, state, today):
             lines.append("  that cancel each other: when one fills, the other is canceled.")
     if ready:
         lines.append("  Reply \"yes\" to place this one order, or \"no\" to skip it.")
-        if broker != "ibkr":
+        if broker not in ("ibkr", "manual"):
             lines.append("  Claude's own card then asks again: Allow once places it, Deny stops it.")
     return "\n".join(lines), ready
 
@@ -518,6 +723,10 @@ def cmd_approve(a):
     print("Recorded your yes for order %d: %s." % (a.index, plain(order)))
     if str(cfg.get("broker", "alpaca")).lower() == "ibkr":
         print("Now draft it with the Interactive Brokers connector; approve it in your IBKR account.")
+    elif MARKET == "in":
+        print("Alpaca does not trade the NSE: enter this order yourself in your broker's app, exactly as above.")
+        print("Then: ticket.py result --index %d --status placed|failed, and ticket.py fill with the fill price."
+              % a.index)
     else:
         print("Now call place_stock_order with exactly:")
         print(json.dumps(tool_input(order), indent=2))
@@ -575,6 +784,7 @@ def cmd_fill(a):
     date = a.date or to_eastern(now).date().isoformat()
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
         raise TicketError("--date wants a date like 2026-10-19")
+    a.symbol = market_symbol(a.symbol)
     pf = apply_fill(a.portfolio, cfg, a.symbol, a.side, a.qty, a.price, date)
     log_fill(a.state, now, date, a.symbol, a.side, a.qty, a.price)
     print("Recorded %s %s %s at %s on %s in %s. Cash now %s." % (a.side, a.qty, a.symbol.upper(),
@@ -585,7 +795,7 @@ def cmd_fill(a):
 
 def cmd_flatten(a):
     cfg = read_json(a.config, "config", required=False) or {}
-    sym = a.symbol.strip().upper()
+    sym = market_symbol(a.symbol)
     now, today = _clock(a)
     source = "the broker, get_open_position"
     if a.qty is not None:
@@ -595,14 +805,14 @@ def cmd_flatten(a):
     else:
         pf = read_json(a.portfolio, "portfolio", required=False) or {}
         qty = sum(_f(p.get("shares", p.get("qty"))) or 0 for p in pf.get("positions", [])
-                  if str(p.get("ticker") or p.get("symbol") or "").upper() == sym)
+                  if market_symbol(p.get("ticker") or p.get("symbol")) == sym)
         source = a.portfolio
         if qty <= 1e-9:
             raise TicketError("nothing to flatten: no %s shares in %s. Check the broker (get_open_position "
                               "%s) and pass --qty if you do hold some" % (sym, a.portfolio, sym))
     plan = read_json(a.plan, "plan", required=False) or {}
-    flat_by = (plan.get("flat_by") if str(plan.get("symbol", "")).upper() == sym else None) \
-        or cfg.get("flat_by") or "15:55"
+    flat_by = (plan.get("flat_by") if market_symbol(plan.get("symbol", "")) == sym else None) \
+        or cfg.get("flat_by") or FLAT_BY
     order = {"symbol": sym, "side": "sell", "qty": _str_num(qty), "type": "market", "time_in_force": "day",
              "why": "flat by %s New York: closes the %s day trade before the close (qty from %s)"
              % (flat_by, sym, source)}
@@ -612,19 +822,25 @@ def cmd_flatten(a):
            "paper": bool(cfg.get("paper", True)),
            "note": "Flatten ticket. Nothing is placed until trader-risk passes it and you say yes in the chat.",
            "source": "ticket.py flatten %s on %s" % (sym, today), "orders": [order]}
-    write_json(a.orders, doc)
+    order["why"] = localize(order["why"])
+    write_json(a.orders, tag_market(doc))
     print("Flatten %s: %s (flat by %s New York)." % (sym, plain(order), flat_by))
     print("Wrote it to %s%s." % (a.orders, (" (it replaced %d earlier proposal%s)"
                                              % (replaced, "" if replaced == 1 else "s")) if replaced else ""))
     if a.qty is None:
-        print("The qty comes from %s. Check it against get_open_position %s before you say yes." % (source, sym))
+        print("The qty comes from %s. Check it against %s before you say yes."
+              % (source, "your broker's positions" if MARKET == "in" else "get_open_position " + sym))
     print("Next:")
     print("  1. trader-risk: check.py. A sell that only closes what you hold is never blocked by the daily")
     print("     limits or the entry window.")
     print("  2. ticket.py show, then the user's yes for this one order.")
-    print("  3. If the bracket's stop-loss and take-profit are still open, Alpaca holds these shares for them")
-    print("     and rejects a new sell. Cancel them first: get_orders (status open, nested true), then")
-    print("     cancel_order_by_id for each open leg (Needs approval). Then place_stock_order with the ticket.")
+    if MARKET == "in":
+        print("  3. Cancel the open stop-loss and target in your broker's app first, then exit the position")
+        print("     there. Most brokers square off intraday (MIS) positions on their own from about 15:15.")
+    else:
+        print("  3. If the bracket's stop-loss and take-profit are still open, Alpaca holds these shares for them")
+        print("     and rejects a new sell. Cancel them first: get_orders (status open, nested true), then")
+        print("     cancel_order_by_id for each open leg (Needs approval). Then place_stock_order with the ticket.")
     return 0
 
 
@@ -704,15 +920,20 @@ def main(argv=None):
     p.add_argument("--state", default="trader/state/broker.json")
     clock(p)
     p.add_argument("--all", action="store_true")
+    for p in sub.choices.values():
+        p.add_argument("--market", help="us (NYSE, the default) or in (NSE, India time, rupees)")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
         return 1
     try:
-        return {"show": cmd_show, "approve": cmd_approve, "decline": cmd_decline, "result": cmd_result,
-                "fill": cmd_fill, "flatten": cmd_flatten, "log": cmd_log}[a.cmd](a)
-    except TicketError as e:
-        print("ticket.py: %s" % e, file=sys.stderr)
+        orders_doc = {} if a.cmd in ("fill", "flatten") else read_doc(getattr(a, "orders", None))
+        set_market(pick_market(a.market, getattr(a, "config", None) or "trader/config.json", docs=[orders_doc],
+                               symbols=[getattr(a, "symbol", None)]))
+        return run_localized({"show": cmd_show, "approve": cmd_approve, "decline": cmd_decline, "result": cmd_result,
+                              "fill": cmd_fill, "flatten": cmd_flatten, "log": cmd_log}[a.cmd], a)
+    except (TicketError, ValueError) as e:
+        print("ticket.py: %s" % localize(str(e)), file=sys.stderr)
         return 1
 
 

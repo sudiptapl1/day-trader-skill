@@ -37,6 +37,10 @@ python3 "${CLAUDE_SKILL_DIR}/size.py" --weights AAPL=40,KO=60 --config split.jso
 `--now "2026-10-19 10:15"` pins the clock (New York time). A plan for
 another day is refused: make a new one with trader-exit.
 
+## India (NSE)
+
+For an NSE plan, sizes are in rupees: the `*_usd` keys are read as rupees. Start from `config.india.example.json` (`"market": "in"`, a ₹5,00,000 budget, ₹5,000 max loss per trade, entries 09:30 to 15:00, flat by 15:15).
+
 ## What it reads and writes
 
 | file | what |
